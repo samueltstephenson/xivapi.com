@@ -20,11 +20,13 @@ class ElasticQuery
      */
     public function getQuery(string $type = 'must'): array
     {
-        $response = [
-            'query' => [
+        $response = [];
+        
+        if ($this->body || $this->filters) {
+            $response['query'] = [
                 'bool' => []
-            ]
-        ];
+            ];
+        }
         
         if ($this->limit) {
             $response['from'] = $this->limit[0];
@@ -41,10 +43,6 @@ class ElasticQuery
 
         if ($this->filters) {
             $response['query']['bool']['filter'] = $this->filters;
-        }
-
-        if ($this->suggestions) {
-            $response['suggest'] = $this->suggestions;
         }
 
         return $response;
@@ -91,6 +89,19 @@ class ElasticQuery
         ];
         return $this;
     }
+    
+    public function nested(string $path, array $query): self
+    {
+        $nested = array_merge($query, [
+            "path" => $path
+        ]);
+        
+        $this->body[] = [
+            "nested" => $nested
+        ];
+
+        return $this;
+    }
 
     // https://www.elastic.co/guide/en/elasticsearch/reference/current/search-suggesters.html
     public function addSuggestion(string $field, string $value): self
@@ -131,7 +142,9 @@ class ElasticQuery
         $this->body[]['match'] = [
             $field => [
                 'query' => strtolower($value),
-                'fuzziness' => '5',
+                'fuzziness' => 'AUTO',
+                'prefix_length' => 1,
+                'max_expansions' => 10,
             ]
         ];
 

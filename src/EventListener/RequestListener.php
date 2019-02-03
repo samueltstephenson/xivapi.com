@@ -31,10 +31,20 @@ class RequestListener
             return;
         }
 
-        Sentry::install();
-
         /** @var Request $request */
         $request = $event->getRequest();
+
+        // todo - temp measure until implement a proper blacklist.
+        if ($request->get('key') == '0e1339f00eb14023a206afef') {
+            die('API Key has been blacklisted from XIVAPI. Please update the app or extension you are using.');
+        }
+
+        // Another quick hack to convert all queries into the request object
+        if ($queries = $request->query->all()) {
+            foreach ($queries as $key => $value) {
+                $request->request->set($key, $value);
+            }
+        }
 
         // Quick hack to allow json body requests
         if ($json = $request->getContent()) {
@@ -42,7 +52,7 @@ class RequestListener
                 $json = \GuzzleHttp\json_decode($json);
 
                 foreach($json as $key => $value) {
-                    $request->request->set($key, $value);
+                    $request->request->set($key, is_array($value) ? implode(',', $value) : $value);
                 }
             }
         }
@@ -53,20 +63,13 @@ class RequestListener
         // register language based on domain
         Language::register($request);
 
-        // record analytics
-        GoogleAnalytics::hit(getenv('SITE_CONFIG_GOOGLE_ANALYTICS'), $request->getPathInfo());
-        GoogleAnalytics::event(
-            getenv('SITE_CONFIG_GOOGLE_ANALYTICS'),
-            'Requests',
-            'Endpoint',
-            explode('/', $request->getPathInfo())[1] ?? 'Home'
-        );
-    
         // register app keys
         AppRequest::setManager($this->appManager);
         AppRequest::setUser($this->userService->getUser());
         AppRequest::handleAppRequestRegistration($request);
-        AppRequest::handleTracking($request);
-        AppRequest::handleRateLimit($request);
+
+        // record analytics
+        GoogleAnalytics::trackHits($request);
+        GoogleAnalytics::trackBaseEndpoint($request);
     }
 }

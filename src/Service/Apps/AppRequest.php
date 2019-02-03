@@ -3,7 +3,7 @@
 namespace App\Service\Apps;
 
 use App\Controller\CompanionMarketController;
-use App\Controller\ConceptTooltipsController;
+use App\Controller\TooltipsController;
 use App\Controller\LodestoneCharacterController;
 use App\Controller\LodestoneController;
 use App\Controller\LodestoneFreeCompanyController;
@@ -11,10 +11,13 @@ use App\Controller\LodestonePvPTeamController;
 use App\Controller\LodestoneStatisticsController;
 use App\Controller\SearchController;
 use App\Controller\XivGameContentController;
-use App\Entity\App;
+use App\Entity\UserApp;
 use App\Entity\User;
+use App\Exception\ApiUserBannedException;
 use App\Exception\ApiRateLimitException;
 use App\Exception\ApiRestrictedException;
+use App\Exception\ApiAppBannedException;
+use App\Service\Common\Language;
 use App\Service\Redis\Redis;
 use App\Service\ThirdParty\GoogleAnalytics;
 use Symfony\Component\HttpFoundation\Request;
@@ -26,7 +29,7 @@ class AppRequest
      */
     const URL = [
         CompanionMarketController::class,
-        ConceptTooltipsController::class,
+        TooltipsController::class,
         LodestoneCharacterController::class,
         LodestoneController::class,
         LodestoneFreeCompanyController::class,
@@ -40,7 +43,7 @@ class AppRequest
     private static $manager = null;
     /** @var User */
     private static $user = null;
-    /** @var App */
+    /** @var UserApp */
     private static $app = null;
 
     /**
@@ -62,9 +65,9 @@ class AppRequest
     /**
      * Get the current registered app
      *
-     * @return App|null
+     * @return UserApp|null
      */
-    private static function app(): ?App
+    private static function app(): ?UserApp
     {
         $app = self::$app;
 
@@ -95,12 +98,10 @@ class AppRequest
 
     /**
      * Register an application
-     *
-     * @param Request $request
      */
     public static function handleAppRequestRegistration(Request $request): void
     {
-        /** @var App $app */
+        /** @var UserApp $app */
         $app = self::$manager->getByKey($request->get('key') ?: null);
         self::$app = $app;
         
@@ -124,140 +125,133 @@ class AppRequest
             return;
         }
 
-        // Track Developer App on Google Analytics (this is for XIVAPI Analytics)
-        GoogleAnalytics::event(
-            getenv('SITE_CONFIG_GOOGLE_ANALYTICS'),
-            'Apps',
-            $app->getApiKey(),
-            "{$app->getName()} - {$app->getUser()->getUsername()}"
-        );
-    
-        // Track developer app routes
-        GoogleAnalytics::event(
-            getenv('SITE_CONFIG_GOOGLE_ANALYTICS'),
-            'Apps - Routes',
-            "{$app->getName()} - {$app->getApiKey()} - {$app->getUser()->getUsername()}",
-            $request->getPathInfo()
-        );
-    
-        // Track developer app referer
-        if (!empty($request->headers->get('referer'))) {
-            GoogleAnalytics::event(
-                getenv('SITE_CONFIG_GOOGLE_ANALYTICS'),
-                'Apps - Referer',
-                "{$app->getName()} - {$app->getApiKey()} - {$app->getUser()->getUsername()}",
-                $request->headers->get('referer')
-            );
-        } else {
-            GoogleAnalytics::event(
-                getenv('SITE_CONFIG_GOOGLE_ANALYTICS'),
-                'Apps - Referer',
-                "{$app->getName()} - {$app->getApiKey()} - {$app->getUser()->getUsername()}",
-                "None"
-            );
+        // check if user is banned
+        if ($app->getUser()->isBanned()) {
+            GoogleAnalytics::trackUserBanned($app->getUser());
+            throw new ApiUserBannedException();
         }
+        
+        // check if app is suspended
+        if ($app->isBanned()) {
+            GoogleAnalytics::trackAppBanned($app);
+            throw new ApiAppBannedException();
+        }
+
+        // record auto ban count
+        Redis::Cache()->increment('app_autoban_count_'. $app->getApiKey());
+        Redis::Cache()->increment('app_autolimit_count_'. $app->getApiKey());
+
+        // Track Developer App on Google Analytics (this is for XIVAPI Analytics)
+        GoogleAnalytics::trackAppUsage($app);
+        GoogleAnalytics::trackAppRouteAccess($app, $request);
+
+        // If the app has Google Analytics, send a hit request.
+        if ($googleAnalyticsId = $app->getGoogleAnalyticsId()) {
+            GoogleAnalytics::hit($googleAnalyticsId, $request->getPathInfo());
+        }
+
+        // handle app rate limit
+        self::handleAppRateLimit($request);
+
+        // handle custom app tracking
+        self::handleAppTracking($request);
     }
 
     /**
-     * Track app requests using Google Analytics
-     *
-     * @param Request $request
+     * handle app tracking
      */
-    public static function handleTracking(Request $request)
+    private static function handleAppTracking(Request $request)
     {
-        if ($app = self::app()) {
-            // If the app has Google Analytics, send a hit request.
-            if ($app->hasGoogleAnalytics()) {
-                GoogleAnalytics::hit(
-                    $app->getGoogleAnalyticsId(),
-                    $request->getPathInfo()
-                );
-            }
+        $app  = self::app();
+
+        if ($app && $app->getGoogleAnalyticsId()) {
+            $id = $app->getGoogleAnalyticsId();
+
+            // custom events
+            GoogleAnalytics::event($id, 'Requests', 'Endpoint', explode('/', $request->getPathInfo())[1] ?? 'Home');
+            GoogleAnalytics::event($id, 'Requests', 'Language', Language::current());
         }
     }
 
     /**
      * Handle an apps rate limit
-     *
-     * @param Request $request
      */
-    public static function handleRateLimit(Request $request)
+    public static function handleAppRateLimit(Request $request)
     {
+        // don't rate limit stuff not in our url list
+        $controller = explode('::', $request->attributes->get('_controller'))[0];
+        if (!in_array($controller, self::URL)) {
+            return;
+        }
+        
         $ip   = md5($request->getClientIp());
         $user = self::user();
         $app  = self::app();
-        
-        if ($user && $app == null) {
-            $ratelimit  = 3;
-            $keyNow   = "app_rate_limit_ip_{$ip}_{$user->getId()}_now";
-            $keyBurst = "app_rate_limit_ip_{$ip}_{$user->getId()}_burst";
-        }
-        
-        if ($app) {
-            $keyNow   = "app_rate_limit_ip_{$ip}_{$app->getApiKey()}_now";
-            $keyBurst = "app_rate_limit_ip_{$ip}_{$app->getApiKey()}_burst";
-        }
-        
-        // ignore if neither
-        if (!isset($keyNow)) {
+
+        $second = date('s');
+
+        // default to no rate limit
+        $limit = 1;
+
+        // key is set on if an app exists, otherwise if a user exists, otherwise nout.
+        $key = $app ? "app_rate_limit_ip_{$ip}_{$app->getApiKey()}_{$second}" : (
+              $user ? "app_rate_limit_ip_{$ip}_{$user->getId()}_{$second}" : null
+        );
+
+        $keyBurst = $app ? "app_rate_limit_ip_{$ip}_{$app->getApiKey()}_burst" : (
+                    $user ? "app_rate_limit_ip_{$ip}_{$user->getId()}_burst" : null
+        );
+
+        // if no key set, skip
+        if ($key === null) {
             return;
         }
     
         // increment req counts
-        $count = Redis::Cache()->get($keyNow);
+        $count = Redis::Cache()->get($key);
         $count = $count ? $count + 1 : 1;
-        Redis::Cache()->set($keyNow, $count, 1);
-        
+        Redis::Cache()->set($key, $count, 2);
+
+        $burst = null;
         if ($app) {
-            // increment burst
+            // check if burst hit
             $burst = Redis::Cache()->get($keyBurst);
-            $burst = $burst ? $burst + 1 : 1;
-            Redis::Cache()->set($keyBurst, $burst, 5);
-            
-            // rate limit is 2x while not in burst timeout
-            $burstlimit = 5;
-            $ratelimit  = $burst > $burstlimit ? $app->getApiRateLimit() : ($app->getApiRateLimit() * 2);
+
+            // append on burst limit depending on if they've hit the burst or not.
+            $limit = $app->getApiRateLimit() + ($burst ? 0 : $app->getApiRateLimitBurst());
         }
 
         // check limit against this ip
-        if ($count > $ratelimit && ($app == null || $burst > $burstlimit)) {
-            // if the app has Google Analytics, send an event
-            if ($app && $app->hasGoogleAnalytics()) {
-                GoogleAnalytics::event(
-                    $app->getGoogleAnalyticsId(),
-                    'Exceptions',
-                    'ApiRateLimitException',
-                    $ip
-                );
+        if ($count > $limit) {
+            // if not already marked as burst, do so
+            if ($app && $burst == false) {
+                Redis::Cache()->set($keyBurst, true, 5);
             }
-        
-            throw new ApiRateLimitException();
+
+            if ($app) {
+                // record rate limit on XIVAPI
+                GoogleAnalytics::event('{XIVAPI}', 'RateLimited', $app->getApiKey(), "{$app->getName()} - {$app->getUser()->getUsername()}");
+
+                // if user has google analytics, fire off rate limit exception to user.
+                if ($app->getGoogleAnalyticsId()) {
+                    GoogleAnalytics::event($app->getGoogleAnalyticsId(), 'Exceptions', 'ApiRateLimitException', $ip);
+                }
+            }
+
+            throw new ApiRateLimitException($count, $limit);
         }
     }
 
     /**
      * Handle an API exception
-     *
-     * @param array $json
      */
-    public static function handleException(array $json)
+    public static function handleException(\stdClass $json)
     {
         if ($app = self::app()) {
             // if the app has Google Analytics, send an event
-            if ($app->hasGoogleAnalytics()) {
-                GoogleAnalytics::event(
-                    $app->getGoogleAnalyticsId(),
-                    'Exceptions',
-                    'ApiServiceErrorException',
-                    $json['Message']
-                );
-
-                GoogleAnalytics::event(
-                    $app->getGoogleAnalyticsId(),
-                    'Exceptions',
-                    'ApiServiceCodeException',
-                    $json['Debug']['Code']
-                );
+            if ($id = $app->getGoogleAnalyticsId()) {
+                GoogleAnalytics::event($id, 'Exceptions', 'ApiServiceErrorException', $json->Message);
+                GoogleAnalytics::event($id, 'Exceptions', 'ApiServiceCodeException', $json->Debug->Code);
             }
         }
     }

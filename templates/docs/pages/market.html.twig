@@ -91,6 +91,8 @@
         companion API is having issues accessing the Data Center where the server is based.
     </p>
 
+    <p>At this time the following servers are not supported due to world congestion: {{ server_unsupported|join(', ', ' and ') }}</p>
+
     <table class="param-table">
         <thead>
         <tr>
@@ -99,13 +101,10 @@
         </tr>
         </thead>
         <tbody>
-        {% for server in server_list %}
-            {% set status = server_status['xivapi_'~ server] ?? null %}
+        {% for token in server_tokens %}
             <tr>
-                <td>{{ server }}</td>
-                <td>
-                    <small>{{ status.status ? status.status : 'OFFLINE' }}</small>
-                </td>
+                <td>{{ token.server }}</td>
+                <td>{{ token.online ? 'Market Online' : 'OFFLINE' }}</td>
             </tr>
         {% endfor %}
         </tbody>

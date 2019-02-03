@@ -12,7 +12,7 @@ use Symfony\Component\HttpFoundation\Request;
 use Symfony\Bundle\FrameworkBundle\Controller\Controller;
 use App\Service\User\UserService;
 use App\Service\User\SSO\DiscordSignIn;
-use App\Entity\App;
+use App\Entity\UserApp;
 use App\Entity\MapCompletion;
 use App\Entity\MapPosition;
 use App\Entity\User;
@@ -103,14 +103,14 @@ class ApplicationsController extends Controller
             return $this->redirectToRoute('app');
         }
         
-        $user->checkBannedStatus();
+        $user->checkBannedStatusAndRedirectUserToDiscord();
 
         if ($id === 'new') {
             $app = $this->apps->create();
             return $this->redirectToRoute('app_manage', [ 'id' => $app->getId() ]);
         }
 
-        /** @var App $app */
+        /** @var UserApp $app */
         $app = $this->apps->get($id);
         if (!$app || $app->getUser()->getId() !== $user->getId()) {
             throw new NotFoundHttpException('Application not found');
@@ -144,9 +144,9 @@ class ApplicationsController extends Controller
             return $this->redirectToRoute('app');
         }
     
-        $user->checkBannedStatus();
+        $user->checkBannedStatusAndRedirectUserToDiscord();
     
-        /** @var App $app */
+        /** @var UserApp $app */
         $app = $this->apps->get($id);
         if (!$app || $app->getUser()->getId() !== $user->getId()) {
             throw new NotFoundHttpException('Application not found');
@@ -180,9 +180,9 @@ class ApplicationsController extends Controller
             return $this->redirectToRoute('app');
         }
     
-        $user->checkBannedStatus();
+        $user->checkBannedStatusAndRedirectUserToDiscord();
         
-        /** @var App $app */
+        /** @var UserApp $app */
         $app = $this->apps->get($id);
         
         if (!$app) {
@@ -216,9 +216,9 @@ class ApplicationsController extends Controller
             return $this->redirectToRoute('app');
         }
         
-        $user->checkBannedStatus();
+        $user->checkBannedStatusAndRedirectUserToDiscord();
         
-        /** @var App $app */
+        /** @var UserApp $app */
         $app = $this->apps->get($id);
         
         if (!$app) {
@@ -249,9 +249,9 @@ class ApplicationsController extends Controller
             return $this->redirectToRoute('app');
         }
     
-        $user->checkBannedStatus();
+        $user->checkBannedStatusAndRedirectUserToDiscord();
         
-        /** @var App $app */
+        /** @var UserApp $app */
         $app = $this->apps->get($id);
         
         if (!$app) {
@@ -266,210 +266,5 @@ class ApplicationsController extends Controller
         $this->em->flush();
         
         return $this->redirectToRoute('app');
-    }
-    
-    /**
-     * @Route("/app/{id}/map", name="app_manage_map")
-     */
-    public function appMappy(Request $request, string $id)
-    {
-        /** @var User $user */
-        $user = $this->userService->getUser();
-    
-        if (!$user) {
-            return $this->redirectToRoute('app');
-        }
-
-        $user->checkBannedStatus();
-    
-        /** @var App $app */
-        $app = $this->apps->get($id);
-        if (!$app || $app->getUser()->getId() !== $user->getId()) {
-            throw new NotFoundHttpException('Application not found');
-        }
-        
-        $regions        = [];
-        $maps           = [];
-        $mapsCompleted  = [];
-        foreach ($this->cache->get('ids_Map') as $id) {
-            /** @var \stdClass $obj */
-            $obj = $this->cache->get("xiv_Map_{$id}");
-            
-            // ignore stuff with no placename
-            if (!isset($obj->PlaceName->ID)) {
-                continue;
-            }
-
-            /** @var MapPositionRepository $repo */
-            $repo = $this->em->getRepository(MapPosition::class);
-            $positions = $repo->getTotal($obj->ID);
-            
-            $map = [
-                'ID'            => $obj->ID,
-                'Url'           => $obj->Url,
-                'MapFilename'   => $obj->MapFilename,
-                'SizeFactor'    => $obj->SizeFactor,
-                'Positions'     => $positions,
-                'PlaceName'     => [
-                    'ID'    => $obj->PlaceName->ID,
-                    'Name'  => empty($obj->PlaceName->Name_en) ? 'Unknown' : $obj->PlaceName->Name_en,
-                ],
-                'PlaceNameSub'     => [
-                    'ID'    => $obj->PlaceNameSub->ID ?? '-',
-                    'Name'  => empty($obj->PlaceNameSub->Name_en) ? '' : $obj->PlaceNameSub->Name_en,
-                ],
-                'Region'        => [
-                    'ID'    => $obj->PlaceNameRegion->ID ?? '-',
-                    'Name'  => $obj->PlaceNameRegion->Name_en ?? 'No-Region',
-                ],
-                'Zone'          => [
-                    'ID'    => $obj->TerritoryType->PlaceNameZone->ID ?? '-',
-                    'Name'  => $obj->TerritoryType->PlaceNameZone->Name_en ?? 'No-Zone',
-                ],
-            ];
-            
-            $maps[$obj->PlaceNameRegion->ID ?? 'Unknown'][] = $map;
-            $regions[$obj->PlaceNameRegion->ID ?? 'Unknown'] = $obj->PlaceNameRegion->Name_en;
-            
-            // get map state
-            $repo = $this->em->getRepository(MapCompletion::class);
-            $mapCompletion = $repo->findOneBy([ 'MapID' => $obj->ID ]);
-            $mapsCompleted[$obj->ID] = false;
-            
-            /** @var MapCompletion $complete */
-            if ($mapCompletion) {
-                $mapsCompleted[$obj->ID] = $mapCompletion->isComplete();
-            }
-            
-        }
-
-        ksort($maps);
-        ksort($regions);
-        
-        return $this->render('app/mappy.html.twig', [
-            'allowed'           => $user->hasMapAccess(),
-            'app'               => $app,
-            'maps'              => $maps,
-            'regions'           => $regions,
-            'mapsCompleted'     => $mapsCompleted,
-            'showCompleted'     => !empty($request->get('completed'))
-        ]);
-    }
-    
-    /**
-     * @Route("/app/{id}/{map}", name="app_manage_map_view")
-     */
-    public function appMappyView(string $id, string $map)
-    {
-        /** @var User $user */
-        $user = $this->userService->getUser();
-    
-        if (!$user) {
-            return $this->redirectToRoute('app');
-        }
-
-        $user->checkBannedStatus();
-    
-        /** @var App $app */
-        $app = $this->apps->get($id);
-        if (!$app || $app->getUser()->getId() !== $user->getId()) {
-            throw new NotFoundHttpException('Application not found');
-        }
-        
-        $map = $this->cache->get("xiv_Map_{$map}");
-    
-        // get completion info
-        $repo = $this->em->getRepository(MapCompletion::class);
-        $complete = $repo->findOneBy([ 'MapID' => $map->ID ]) ?: new MapCompletion();
-        
-        return $this->render('app/mappy_view.html.twig', [
-            'allowed'   => $user->hasMapAccess(),
-            'app'       => $app,
-            'map'       => $map,
-            'complete'  => $complete,
-        ]);
-    }
-    
-    /**
-     * @Route("/app/{id}/{map}/data", name="app_manage_map_data")
-     */
-    public function appMappyData(Request $request, string $id, string $map)
-    {
-        /** @var User $user */
-        $user = $this->userService->getUser();
-    
-        if (!$user) {
-            return $this->redirectToRoute('app');
-        }
-
-        $user->checkBannedStatus();
-    
-        /** @var App $app */
-        $app = $this->apps->get($id);
-        if (!$app || $app->getUser()->getId() !== $user->getId()) {
-            throw new NotFoundHttpException('Application not found');
-        }
-        
-        $repo = $this->em->getRepository(MapPosition::class);
-        $positions = [];
-        
-        /** @var MapPosition $pos */
-        $offset = (int)($request->get('offset'))-2;
-        $offset = $offset < 0 ? 0 : $offset;
-        
-        $size   = $request->get('size');
-        foreach ($repo->findBy([ 'MapID' => $map ], [ 'Added' => 'Asc' ], $size, $offset) as $pos) {
-            $positions[$pos->getID()] = [
-                $pos->getName(),
-                $pos->getType(),
-                
-                // divide by 2 as the map is half the size in the viewer
-                $pos->getPixelX() / 2,
-                $pos->getPixelY() / 2,
-                
-                $pos->getPosX(),
-                $pos->getPosY()
-            ];
-        }
-        
-        return $this->json($positions);
-    }
-    
-    /**
-     * @Route("/app/{id}/{map}/update", name="app_manage_map_update")
-     */
-    public function appMappyUpdate(Request $request, string $id, string $map)
-    {
-        /** @var User $user */
-        $user = $this->userService->getUser();
-        if (!$user) {
-            return $this->redirectToRoute('app');
-        }
-
-        $user->checkBannedStatus();
-    
-        /** @var App $app */
-        $app = $this->apps->get($id);
-        if (!$app || $app->getUser()->getId() !== $user->getId()) {
-            throw new NotFoundHttpException('Application not found');
-        }
-        
-        $repo = $this->em->getRepository(MapCompletion::class);
-        
-        // get map completion or
-        /** @var MapCompletion $complete */
-        $complete = $repo->findOneBy([ 'MapID' => $map ]) ?: new MapCompletion();
-        $complete
-            ->setMapID($map)
-            ->setNotes($request->get('notes'))
-            ->setComplete($request->get('complete') == 'on');
-        
-        $this->em->persist($complete);
-        $this->em->flush();
-        
-        return $this->redirectToRoute('app_manage_map_view', [
-            'id' => $id,
-            'map' => $map
-        ]);
     }
 }

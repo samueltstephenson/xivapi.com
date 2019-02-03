@@ -7,18 +7,27 @@ use Ramsey\Uuid\Uuid;
 use Doctrine\ORM\Mapping as ORM;
 
 /**
- * @ORM\Table(name="users")
+ * @ORM\Table(
+ *     name="users",
+ *     indexes={
+ *          @ORM\Index(name="added", columns={"added"}),
+ *          @ORM\Index(name="is_new", columns={"is_new"}),
+ *          @ORM\Index(name="is_banned", columns={"is_banned"}),
+ *          @ORM\Index(name="is_locked", columns={"is_locked"}),
+ *
+ *          @ORM\Index(name="sso", columns={"sso"}),
+ *          @ORM\Index(name="sso_id", columns={"sso_id"}),
+ *          @ORM\Index(name="session", columns={"session"}),
+ *          @ORM\Index(name="username", columns={"username"}),
+ *          @ORM\Index(name="email", columns={"email"}),
+ *          @ORM\Index(name="apps_max", columns={"apps_max"})
+ *     }
+ * )
  * @ORM\Entity(repositoryClass="App\Repository\UserRepository")
  */
 class User
 {
-    const MAX_APPS = [
-        1 => 1,
-        2 => 1,
-        3 => 5,
-        4 => 10,
-        5 => 20,
-    ];
+    use UserTrait;
 
     /**
      * @var string
@@ -26,11 +35,6 @@ class User
      * @ORM\Column(type="guid")
      */
     private $id;
-    /**
-     * @var int
-     * @ORM\Column(type="integer")
-     */
-    private $added;
     /**
      * The name of the SSO provider
      * @var string
@@ -76,13 +80,12 @@ class User
      * @ORM\Column(type="string", length=60, nullable=true)
      */
     private $avatar;
+
+    // -- Apps
+
     /**
-     * @var int
-     * @ORM\Column(type="integer", length=2)
-     */
-    private $level = 2;
-    /**
-     * @ORM\OneToMany(targetEntity="App", mappedBy="user")
+     * @ORM\OneToMany(targetEntity="UserApp", mappedBy="user")
+     * @ORM\OrderBy({"name" = "ASC"})
      */
     private $apps;
     /**
@@ -90,86 +93,101 @@ class User
      * @ORM\Column(type="integer", length=16)
      */
     private $appsMax = 1;
+
+    // -- Mappy
+
     /**
      * @var bool
-     * @ORM\Column(type="boolean", name="is_banned")
+     * @ORM\Column(type="boolean", name="has_mappy_access", options={"default" : 0})
      */
-    private $banned = false;
-    
+    private $mappyAccessEnabled = false;
+    /**
+     * @var int
+     * @ORM\Column(type="integer", options={"default" : 0})
+     */
+    private $mappyAccessCode = 0;
+
     public function __construct()
     {
         $this->id = Uuid::uuid4();
+        $this->added = time();
         $this->session = Uuid::uuid4()->toString() . Uuid::uuid4()->toString() . Uuid::uuid4()->toString();
         $this->apps = new ArrayCollection();
-        $this->added = time();
     }
 
-    public function getId()
+    // -------------------------------------------------------
+
+    /**
+     * Check ban status (will redirect if they're ban)
+     */
+    public function checkBannedStatusAndRedirectUserToDiscord()
     {
-        return $this->id;
+        if ($this->isBanned()) {
+            header("Location: https://discord.gg/MFFVHWC");
+            die();
+        }
     }
 
-    public function setId($id)
+    public function getAvatar(): string
     {
-        $this->id = $id;
+        $token = $this->getToken();
 
-        return $this;
+        if (empty($token->avatar) || stripos($this->avatar, 'xivapi.com') !== false) {
+            return 'http://xivapi.com/img-misc/chat_messengericon_goldsaucer.png';
+        }
+
+        $this->avatar = sprintf("https://cdn.discordapp.com/avatars/%s/%s.png?size=256",
+            $token->id,
+            $token->avatar
+        );
+
+        return $this->avatar;
     }
 
-    public function getSso()
+    public function getToken(): ?\stdClass
+    {
+        return json_decode($this->token);
+    }
+
+    // -------------------------------------------------------
+
+    public function getSso(): string
     {
         return $this->sso;
     }
 
-    public function setSso($sso)
+    public function setSso(string $sso)
     {
         $this->sso = $sso;
 
         return $this;
     }
-    
-    public function getAdded(): int
-    {
-        return $this->added;
-    }
-    
-    public function setAdded(int $added)
-    {
-        $this->added = $added;
-        
-        return $this;
-    }
-    
+
     public function getSsoId(): string
     {
         return $this->ssoId;
     }
-    
+
     public function setSsoId(string $ssoId)
     {
         $this->ssoId = $ssoId;
-        
+
         return $this;
     }
 
-    public function getSession()
+    public function getSession(): string
     {
         return $this->session;
     }
 
-    public function setSession($session)
+    public function setSession(string $session)
     {
         $this->session = $session;
 
         return $this;
     }
 
-    public function getToken()
-    {
-        return json_decode($this->token);
-    }
-
-    public function setToken($token)
+    public function setToken(string $token)
     {
         $this->token = $token;
 
@@ -200,22 +218,6 @@ class User
         return $this;
     }
 
-    public function getAvatar(): string
-    {
-        $token = $this->getToken();
-        
-        if (empty($token->avatar) || stripos($this->avatar, 'xivapi.com') !== false) {
-            return 'http://xivapi.com/img-misc/chat_messengericon_goldsaucer.png';
-        }
-        
-        $this->avatar = sprintf("https://cdn.discordapp.com/avatars/%s/%s.png?size=256",
-            $token->id,
-            $token->avatar
-        );
-
-        return $this->avatar;
-    }
-
     public function setAvatar(string $avatar)
     {
         $this->avatar = $avatar;
@@ -235,12 +237,6 @@ class User
         return $this;
     }
 
-    public function addApp(App $key)
-    {
-        $this->apps[] = $key;
-        return $key;
-    }
-
     public function getAppsMax(): int
     {
         return $this->appsMax;
@@ -252,50 +248,28 @@ class User
 
         return $this;
     }
-    
-    public function isBanned(): bool
+
+    public function isMappyAccessEnabled(): bool
     {
-        return $this->banned;
+        return $this->mappyAccessEnabled;
     }
 
-    public function checkBannedStatus()
+    public function setMappyAccessEnabled(bool $mappyAccessEnabled)
     {
-        if ($this->isBanned()) {
-            header("Location: https://discord.gg/MFFVHWC");
-            die();
-        }
-    }
-    
-    public function setBanned(bool $banned)
-    {
-        $this->banned = $banned;
-        
-        return $this;
-    }
-
-    public function getLevel()
-    {
-        return $this->level;
-    }
-
-    public function setLevel($level)
-    {
-        $this->level = $level;
-
-        $this->setAppsMax(
-            self::MAX_APPS[$this->level]
-        );
+        $this->mappyAccessEnabled = $mappyAccessEnabled;
 
         return $this;
     }
 
-    public function isLimited()
+    public function getMappyAccessCode(): int
     {
-        return (time() - $this->added) < 3600;
+        return $this->mappyAccessCode;
     }
 
-    public function hasMapAccess()
+    public function setMappyAccessCode(int $mappyAccessCode)
     {
-        return $this->level >= 4;
+        $this->mappyAccessCode = $mappyAccessCode;
+
+        return $this;
     }
 }

@@ -2,7 +2,6 @@
 
 namespace App\Controller;
 
-use App\Service\Common\Language;
 use App\Service\Search\SearchRequest;
 use App\Service\Search\SearchResponse;
 use App\Service\Search\Search;
@@ -36,6 +35,10 @@ class SearchController extends AbstractController
         $this->search->handleRequest($searchRequest, $searchResponse);
 
         # print_r($searchResponse->response);die;
+        
+        if ($request->get('print_query')) {
+            return $this->json($searchResponse->query);
+        }
         
         return $this->json($searchResponse->response);
     }
